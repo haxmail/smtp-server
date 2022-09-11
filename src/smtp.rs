@@ -62,8 +62,27 @@ impl Connection {
                     else{
                         Err(MSG_SYNTAX_ERROR)
                     }
+                },
+                State::Mail=>{
+                    if line.starts_with(MAIL_START){
+                        self.next_sender=line[MAIL_START.len()..].trim().to_string(); self.state=State::Rcpt;
+                        Ok(MSG_OK)
+                    }else{
+                        Err(MSG_SYNTAX_ERROR)
+                    }
+                },
+                State::Rcpt=>{
+                    if line.starts_with(RCPT_START){
+                        self.next_recipients.push(line[RCPT_START.len()..].trim().to_string());
+                        self.state=State::RcptOrData;
+                        Ok(MSG_OK)
+                    }else{
+                        Err(MSG_SYNTAX_ERROR)
+                    }
                 }
+
             }
+            
     }
     pub fn handle(reader: &mut dyn BufRead, writer: &mut dyn Write) -> Result<Connection, Error> {
         let mut result = Connection::new();
