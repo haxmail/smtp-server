@@ -62,8 +62,70 @@ impl Connection {
                     else{
                         Err(MSG_SYNTAX_ERROR)
                     }
+                },
+                State::Mail=>{
+                    if line.starts_with(MAIL_START){
+                        self.next_sender=line[MAIL_START.len()..].trim().to_string(); self.state=State::Rcpt;
+                        Ok(MSG_OK)
+                    }else{
+                        Err(MSG_SYNTAX_ERROR)
+                    }
+                },
+                State::Rcpt=>{
+                    if line.starts_with(RCPT_START){
+                        self.next_recipients.push(line[RCPT_START.len()..].trim().to_string());
+                        self.state=State::RcptOrData;
+                        Ok(MSG_OK)
+                    }else{
+                        Err(MSG_SYNTAX_ERROR)
+                    }
                 }
+                State::RcptOrData => {
+                    if line.starts_with(RCPT_START){
+                        self.next_recipients.push(line[RCPT_START.len()..].trim().to_string());
+                        Ok(MSG_OK)
+                    }else if line== DATA_LINE{
+                        self.state=State::Dot;
+                        Ok(MSG_SEND_MESSAGE_CONTENT)
+                    }else{
+                        Err(MSG_SYNTAX_ERROR)
+                    }
+                },
+                State::Dot => {
+                    if line=="."{
+                        self.messages.push(
+                            Message{
+                                sender: self.next_sender.clone(),
+                                receiver: self.next_recipients.clone(),
+                                data: self.next_data.clone(),
+                            }
+                        );
+                        self.next_sender="".to_string();
+                        self.next_recipients=Vec::new();
+                        self.next_data=Vec::new();
+                        self.state=State::MailOrQuit;
+                        Ok(MSG_OK)
+                    }else{
+                        self.next_data.push(line.to_string());
+                        Ok("")
+                    }
+                },
+                State::MailOrQuit => {
+                    if line.starts_with(MAIL_START){
+                        self.next_sender=line[MAIL_START.len()..].trim().to_string();
+                        self.state=State::Rcpt;
+                        Ok(MSG_OK)
+                    }else if line==QUIT_LINE{
+                        self.state=State::Done;
+                        Ok(MSG_BYE)
+                    }else{
+                        Err(MSG_SYNTAX_ERROR)
+                    }
+                },
+                State::Done => Err(MSG_SYNTAX_ERROR),
+
             }
+            
     }
     pub fn handle(reader: &mut dyn BufRead, writer: &mut dyn Write) -> Result<Connection, Error> {
         let mut result = Connection::new();
@@ -72,7 +134,18 @@ impl Connection {
         loop {
             let mut line = String::new();
             reader.read_line(&mut line);
-            match result
+            match result.feed_line(line.trim_matches(|c: char| c=='\n'||c=='\r')){
+                Ok("")=>{},
+                Ok(s)=>{
+                    writeln!(writer,"{}",s)?;
+                    if s.starts_with("221"){
+                        break;
+                    }
+                },
+                Err(e)=>{
+                    writeln!(writer,"{}",e)?;
+                }
+            }
         }
         Ok(result)
     }
