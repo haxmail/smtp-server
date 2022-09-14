@@ -20,6 +20,20 @@ pub struct Message {
     data: Vec<String>,
 }
 
+impl Message {
+    pub fn get_sender(&self) -> &str {
+        &self.sender
+    }
+
+    pub fn get_recipients(&self) -> &Vec<String> {
+        &self.receiver
+    }
+
+    pub fn get_data(&self) -> String {
+        self.data.join("\n")
+    }
+}
+
 enum State {
     Helo,
     Mail,
@@ -50,6 +64,20 @@ impl Connection {
             next_recipients: Vec::new(),
             next_data: Vec::new(),
         }
+    }
+    fn get_if_done<R, F: FnOnce() -> R>(&self, getter: F) -> Option<R> {
+        match self.state {
+            State::Done => Some(getter()),
+            _ => None,
+        }
+    }
+
+    pub fn get_messages(&self) -> Option<&Vec<Message>> {
+        self.get_if_done(|| &self.messages)
+    }
+
+    pub fn get_sender_domain(&self) -> Option<&str> {
+        self.get_if_done(|| self.sender_domain.as_str())
     }
     fn feed_line<'a>(&mut self,line: &'a str)->Result<&'a str, &'a str>{
             match self.state {
@@ -130,10 +158,10 @@ impl Connection {
     pub fn handle(reader: &mut dyn BufRead, writer: &mut dyn Write) -> Result<Connection, Error> {
         let mut result = Connection::new();
 
-        writeln!(writer, "{}", MSG_READY);
+        writeln!(writer, "{}", MSG_READY)?;
         loop {
             let mut line = String::new();
-            reader.read_line(&mut line);
+            reader.read_line(&mut line)?;
             match result.feed_line(line.trim_matches(|c: char| c=='\n'||c=='\r')){
                 Ok("")=>{},
                 Ok(s)=>{
