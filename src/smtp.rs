@@ -1,180 +1,221 @@
-use std::io::{BufRead, Error, Write};
-
-//client commands
-const HELO_START: &str = "HELO ";
-const MAIL_START: &str = "MAIL FROM:";
-const RCPT_START: &str = "RCPT TO:";
-const DATA_LINE: &str = "DATA";
-const QUIT_LINE: &str = "QUIT";
-
-//Server responses
-const MSG_READY: &str = "220 ready";
-const MSG_OK: &str = "250 OK";
-const MSG_SEND_MESSAGE_CONTENT:&str="354 Send message content";
-const MSG_BYE:&str="221 Bye";
-const MSG_SYNTAX_ERROR:&str="500 unexpected line";
-
-pub struct Message {
-    sender: String,
-    receiver: Vec<String>,
-    data: Vec<String>,
+use anyhow::{Context, Ok, Result};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Mail {
+    pub from: String,
+    pub to: Vec<String>,
+    pub data: String,
 }
 
-impl Message {
-    pub fn get_sender(&self) -> &str {
-        &self.sender
-    }
-
-    pub fn get_recipients(&self) -> &Vec<String> {
-        &self.receiver
-    }
-
-    pub fn get_data(&self) -> String {
-        self.data.join("\n")
-    }
-}
-
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum State {
-    Helo,
-    Mail,
-    Rcpt,
-    RcptOrData,
-    Dot,
-    MailOrQuit,
-    Done,
+    Fresh,
+    Greeted,
+    ReceivingRcpt(Mail),
+    ReceivingData(Mail),
+    Received(Mail),
 }
 
-pub struct Connection {
+struct StateMachine {
     state: State,
-    sender_domain: String,
-    messages: Vec<Message>,
-    next_sender: String,
-    next_recipients: Vec<String>,
-    next_data: Vec<String>,
+    ehlo_greeting: String,
 }
 
+impl StateMachine {
+    const HI: &[u8] = b"220 haxmail\n";
+    const OK: &[u8] = b"250 OK\n";
+    const AUTH_OK: &[u8] = b"235 OK\n";
+    const SEND_DATA: &[u8] = b"354 END DATA WITH <CR><LF>.<CR><LF>\n";
+    const BYE: &[u8] = b"221 BYE\n";
+    const EMPTY: &[u8] = &[];
 
-impl Connection {
-    pub fn new() -> Connection {
-        Connection {
-            state: State::Helo,
-            sender_domain: "".to_string(),
-            messages: Vec::new(),
-            next_sender: "".to_string(),
-            next_recipients: Vec::new(),
-            next_data: Vec::new(),
+    pub fn new(domain: impl AsRef<str>) -> StateMachine {
+        let domain = domain.as_ref();
+        let ehlo_greeting = format!("250-{domain} Hello {domain}\n250 AUTH PLAIN LOGIN\n");
+
+        StateMachine {
+            state: State::Fresh,
+            ehlo_greeting,
         }
     }
-    fn get_if_done<R, F: FnOnce() -> R>(&self, getter: F) -> Option<R> {
-        match self.state {
-            State::Done => Some(getter()),
-            _ => None,
-        }
-    }
 
-    pub fn get_messages(&self) -> Option<&Vec<Message>> {
-        self.get_if_done(|| &self.messages)
-    }
-
-    pub fn get_sender_domain(&self) -> Option<&str> {
-        self.get_if_done(|| self.sender_domain.as_str())
-    }
-    fn feed_line<'a>(&mut self,line: &'a str)->Result<&'a str, &'a str>{
-            match self.state {
-                State::Helo=>{
-                    if line.starts_with(HELO_START){
-                        self.sender_domain=line[HELO_START.len()..].trim().to_string();
-                        self.state=State::Mail;
-                        Ok(MSG_OK)
-                    }
-                    else{
-                        Err(MSG_SYNTAX_ERROR)
-                    }
-                },
-                State::Mail=>{
-                    if line.starts_with(MAIL_START){
-                        self.next_sender=line[MAIL_START.len()..].trim().to_string(); self.state=State::Rcpt;
-                        Ok(MSG_OK)
-                    }else{
-                        Err(MSG_SYNTAX_ERROR)
-                    }
-                },
-                State::Rcpt=>{
-                    if line.starts_with(RCPT_START){
-                        self.next_recipients.push(line[RCPT_START.len()..].trim().to_string());
-                        self.state=State::RcptOrData;
-                        Ok(MSG_OK)
-                    }else{
-                        Err(MSG_SYNTAX_ERROR)
-                    }
-                }
-                State::RcptOrData => {
-                    if line.starts_with(RCPT_START){
-                        self.next_recipients.push(line[RCPT_START.len()..].trim().to_string());
-                        Ok(MSG_OK)
-                    }else if line== DATA_LINE{
-                        self.state=State::Dot;
-                        Ok(MSG_SEND_MESSAGE_CONTENT)
-                    }else{
-                        Err(MSG_SYNTAX_ERROR)
-                    }
-                },
-                State::Dot => {
-                    if line=="."{
-                        self.messages.push(
-                            Message{
-                                sender: self.next_sender.clone(),
-                                receiver: self.next_recipients.clone(),
-                                data: self.next_data.clone(),
-                            }
-                        );
-                        self.next_sender="".to_string();
-                        self.next_recipients=Vec::new();
-                        self.next_data=Vec::new();
-                        self.state=State::MailOrQuit;
-                        Ok(MSG_OK)
-                    }else{
-                        self.next_data.push(line.to_string());
-                        Ok("")
-                    }
-                },
-                State::MailOrQuit => {
-                    if line.starts_with(MAIL_START){
-                        self.next_sender=line[MAIL_START.len()..].trim().to_string();
-                        self.state=State::Rcpt;
-                        Ok(MSG_OK)
-                    }else if line==QUIT_LINE{
-                        self.state=State::Done;
-                        Ok(MSG_BYE)
-                    }else{
-                        Err(MSG_SYNTAX_ERROR)
-                    }
-                },
-                State::Done => Err(MSG_SYNTAX_ERROR),
-
+    pub fn handle_smtp(&mut self, raw_msg: &str) -> Result<&[u8]> {
+        tracing::trace!("Received {raw_msg} in state {:?}", self.state);
+        let mut msg = raw_msg.split_whitespace();
+        let command = msg.next().context("received empty command")?.to_lowercase();
+        let state = std::mem::replace(&mut self.state, State::Fresh);
+        match (command.as_str(), state) {
+            ("ehlo", State::Fresh) => {
+                tracing::trace!("Sending AUTH info");
+                self.state = State::Greeted;
+                Ok(self.ehlo_greeting.as_bytes())
             }
-            
+            ("helo", State::Fresh) => {
+                self.state = State::Greeted;
+                Ok(StateMachine::OK)
+            }
+            ("noop", _) | ("help", _) | ("info", _) | ("vrfy", _) | ("expn", _) => {
+                tracing::trace!("Got {command}");
+                Ok(StateMachine::OK)
+            }
+            ("rset", _) => {
+                self.state = State::Fresh;
+                Ok(StateMachine::OK)
+            }
+            ("auth", _) => {
+                tracing::trace!("Acknowledging AUTH");
+                Ok(StateMachine::AUTH_OK)
+            }
+            ("mail", State::Greeted) => {
+                tracing::trace!("Receiving MAIL");
+                let from = msg.next().context("received empty MAIL")?;
+                let from = from
+                    .strip_prefix("FROM:")
+                    .context("received incorrect MAIL")?;
+                tracing::debug!("FROM: {from}");
+                self.state = State::ReceivingRcpt(Mail {
+                    from: from.to_string(),
+                    ..Default::default()
+                });
+                Ok(StateMachine::OK)
+            }
+            ("rcpt", State::ReceivingRcpt(mut mail)) => {
+                tracing::trace!("Receiving rcpt");
+                let to = msg.next().context("received empty RCPT")?;
+                let to = to.strip_prefix("TO:").context("received incorrect RCPT")?;
+                tracing::debug!("TO: {to}");
+                mail.to.push(to.to_string());
+                self.state = State::ReceivingRcpt(mail);
+                Ok(StateMachine::OK)
+            }
+            ("data", State::ReceivingRcpt(mail)) => {
+                tracing::trace!("Receiving data");
+                self.state = State::ReceivingData(mail);
+                Ok(StateMachine::SEND_DATA)
+            }
+            ("quit", State::ReceivingData(mail)) => {
+                tracing::trace!(
+                    "Received data: FROM: {} TO:{} DATA:{}",
+                    mail.from,
+                    mail.to.join(", "),
+                    mail.data
+                );
+                self.state = State::Received(mail);
+                Ok(StateMachine::BYE)
+            }
+            ("quit", _) => {
+                tracing::warn!("Received quit before getting any data");
+                Ok(StateMachine::BYE)
+            }
+            (_, State::ReceivingData(mut mail)) => {
+                tracing::trace!("Receiving data");
+                let resp = if raw_msg.ends_with("\r\n.\r\n") {
+                    StateMachine::OK
+                } else {
+                    StateMachine::EMPTY
+                };
+                mail.data += raw_msg;
+                self.state = State::ReceivingData(mail);
+                Ok(resp)
+            }
+            _ => anyhow::bail!(
+                "Unexpected message received in state {:?}: {raw_msg}",
+                self.state
+            ),
+        }
     }
-    pub fn handle(reader: &mut dyn BufRead, writer: &mut dyn Write) -> Result<Connection, Error> {
-        let mut result = Connection::new();
+}
 
-        writeln!(writer, "{}", MSG_READY)?;
+pub struct Server {
+    stream: tokio::net::TcpStream,
+    state_machine: StateMachine,
+}
+
+impl Server {
+    pub async fn new(domain: impl AsRef<str>, stream: tokio::net::TcpStream) -> Result<Server> {
+        Ok(Server {
+            stream,
+            state_machine: StateMachine::new(domain),
+        })
+    }
+
+    async fn greet(&mut self) -> Result<()> {
+        self.stream
+            .write_all(StateMachine::HI)
+            .await
+            .map_err(|e| e.into())
+    }
+
+    pub async fn serve(mut self) -> Result<()> {
+        self.greet().await?;
+        let mut buffer = vec![0; 65536];
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line)?;
-            match result.feed_line(line.trim_matches(|c: char| c=='\n'||c=='\r')){
-                Ok("")=>{},
-                Ok(s)=>{
-                    writeln!(writer,"{}",s)?;
-                    if s.starts_with("221"){
-                        break;
-                    }
-                },
-                Err(e)=>{
-                    writeln!(writer,"{}",e)?;
+            let n = self.stream.read(&mut buffer).await?;
+
+            if n == 0 {
+                self.state_machine.handle_smtp("quit").ok();
+                break;
+            }
+
+            let msg = std::str::from_utf8(&buffer[..n])?;
+            let response = self.state_machine.handle_smtp(msg)?;
+            if response != StateMachine::EMPTY {
+                self.stream.write_all(response).await?;
+            } else {
+            }
+            if response == StateMachine::BYE {
+                break;
+            }
+
+            match self.state_machine.state {
+                State::Received(ref mut mail) => {
+                    println!("mail: {:?}", mail);
                 }
+                State::ReceivingData(ref mut mail) => {
+                    println!("EOF before end {:?}", mail);
+                }
+                _ => {}
             }
         }
-        Ok(result)
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_regular_flow() {
+        let mut sm = StateMachine::new("dummy");
+        assert_eq!(sm.state, State::Fresh);
+        sm.handle_smtp("HELO localhost").unwrap();
+        assert_eq!(sm.state, State::Greeted);
+        sm.handle_smtp("MAIL FROM: <local@example.com>").unwrap();
+        assert!(matches!(sm.state, State::ReceivingRcpt(_)));
+        sm.handle_smtp("RCPT TO: <a@localhost.com>").unwrap();
+        assert!(matches!(sm.state, State::ReceivingRcpt(_)));
+        sm.handle_smtp("RCPT TO: <b@localhost.com>").unwrap();
+        assert!(matches!(sm.state, State::ReceivingRcpt(_)));
+        sm.handle_smtp("DATA hello world\n").unwrap();
+        assert!(matches!(sm.state, State::ReceivingData(_)));
+        sm.handle_smtp("DATA hello world2\n").unwrap();
+        assert!(matches!(sm.state, State::ReceivingData(_)));
+        sm.handle_smtp("QUIT").unwrap();
+        assert!(matches!(sm.state, State::Received(_)));
+    }
+
+    #[test]
+    fn test_no_greeting() {
+        let mut sm = StateMachine::new("dummy");
+        assert_eq!(sm.state, State::Fresh);
+        for command in [
+            "MAIL FROM: <local@example.com>",
+            "RCPT TO: <local@example.com>",
+            "DATA hey",
+            "GARBAGE",
+        ] {
+            assert!(sm.handle_smtp(command).is_err());
+        }
     }
 }

@@ -1,11 +1,13 @@
 [package]
-name = "server"
+name = "smtpserver"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-threadpool = "1.8.1"
-clap = "3.2.21"
-num_cpus = "1.13.1"
+anyhow = "1.0.69"
+chrono = "0.4.23"
+tokio = { version = "1.25.0", features = ["full"] }
+tracing = "0.1.37"
+tracing-subscriber = "0.3.16"
