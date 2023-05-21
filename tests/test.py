@@ -1,8 +1,8 @@
 import smtplib
 import sys
 
-from_addr = "testfrom@example.com"
-to_addr  = "testto@example.com"
+from_addr = "testfrom@haxmail.buzz"
+to_addr  = "testto@haxmail.buzz"
 
 # Add the From: and To: headers at the start!
 msg = f"From: {from_addr}\r\nTo: {to_addr}\r\n\r\n"

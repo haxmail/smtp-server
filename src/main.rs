@@ -4,7 +4,7 @@ use std::env;
 use tokio::net::TcpListener;
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    dotenv::dotenv().ok();
     let addr = env::args()
         .nth(1)
         .unwrap_or_else(|| "0.0.0.0:2525".to_string());

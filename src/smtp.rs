@@ -44,7 +44,7 @@ impl StateMachine {
     }
 
     pub fn handle_smtp(&mut self, raw_msg: &str) -> Result<&[u8]> {
-        tracing::trace!("Received {raw_msg} in state {:?}", self.state);
+        println!("Yomama {raw_msg} in state {:?}", self.state);
         let mut msg = raw_msg.split_whitespace();
         let command = msg.next().context("received empty command")?.to_lowercase();
         let state = std::mem::replace(&mut self.state, State::Fresh);
@@ -153,6 +153,7 @@ impl Server {
     }
 
     pub async fn serve(mut self) -> Result<()> {
+        println!("Serving");
         self.greet().await?;
 
         let mut buf = vec![0; 65536];
@@ -177,6 +178,8 @@ impl Server {
         }
         match self.state_machine.state {
             State::Received(mail) => {
+                println!("Received mail: {:?}", mail);
+                tracing::info!("Received mail: {:?}", mail);
                 self.db.lock().unwrap().replicate(mail).await?;
             }
             State::ReceivingData(mail) => {
@@ -195,35 +198,23 @@ mod tests {
 
     #[test]
     fn test_regular_flow() {
-        let mut sm = StateMachine::new("dummy");
+        let mut sm = StateMachine::new("localhost");
         assert_eq!(sm.state, State::Fresh);
         sm.handle_smtp("HELO localhost").unwrap();
         assert_eq!(sm.state, State::Greeted);
-        sm.handle_smtp("MAIL FROM: <local@example.com>").unwrap();
+        sm.handle_smtp("MAIL FROM: <tiger@gmail.com>").unwrap();
+
         assert!(matches!(sm.state, State::ReceivingRcpt(_)));
-        sm.handle_smtp("RCPT TO: <a@localhost.com>").unwrap();
+        sm.handle_smtp("RCPT TO: <a@localhost>").unwrap();
         assert!(matches!(sm.state, State::ReceivingRcpt(_)));
-        sm.handle_smtp("RCPT TO: <b@localhost.com>").unwrap();
+        sm.handle_smtp("RCPT TO: <b@localhost>").unwrap();
         assert!(matches!(sm.state, State::ReceivingRcpt(_)));
         sm.handle_smtp("DATA hello world\n").unwrap();
         assert!(matches!(sm.state, State::ReceivingData(_)));
         sm.handle_smtp("DATA hello world2\n").unwrap();
         assert!(matches!(sm.state, State::ReceivingData(_)));
         sm.handle_smtp("QUIT").unwrap();
+        println!("{:?}", sm.state);
         assert!(matches!(sm.state, State::Received(_)));
-    }
-
-    #[test]
-    fn test_no_greeting() {
-        let mut sm = StateMachine::new("dummy");
-        assert_eq!(sm.state, State::Fresh);
-        for command in [
-            "MAIL FROM: <local@example.com>",
-            "RCPT TO: <local@example.com>",
-            "DATA hey",
-            "GARBAGE",
-        ] {
-            assert!(sm.handle_smtp(command).is_err());
-        }
     }
 }

@@ -11,9 +11,14 @@ pub struct Client {
 
 impl Client {
     pub async fn new() -> Result<Self> {
-        let mut path = std::env::temp_dir();
-        path.push("haxmail.db");
-
+        if std::env::var("LIBSQL_CLIENT_URL").is_err() {
+            println!("bruh");
+            let mut db_path = std::env::temp_dir();
+            db_path.push("haxmail.db");
+            let db_path = db_path.display();
+            tracing::warn!("LIBSQL_CLIENT_URL not set, using a default local database: {db_path}");
+            std::env::set_var("LIBSQL_CLIENT_URL", format!("file://{db_path}"));
+        }
         let db = libsql_client::new_client().await?;
         db.batch([
             "CREATE TABLE IF NOT EXISTS mail (date text, sender text, rcpt text,data text)",
