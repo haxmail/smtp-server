@@ -1,9 +1,9 @@
-use std::sync::{Arc, Mutex};
-
-use anyhow::{Context, Ok, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
 use crate::database;
+use anyhow::{Context, Result};
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Mail {
     pub from: String,
@@ -25,26 +25,31 @@ struct StateMachine {
     ehlo_greeting: String,
 }
 
+/// An state machine capable of handling SMTP commands
+/// for receiving mail.
+/// Use handle_smtp() to handle a single command.
+/// The return value from handle_smtp() is the response
+/// that should be sent back to the client.
 impl StateMachine {
-    const HI: &[u8] = b"220 haxmail\n";
-    const OK: &[u8] = b"250 OK\n";
-    const AUTH_OK: &[u8] = b"235 OK\n";
-    const SEND_DATA: &[u8] = b"354 END DATA WITH <CR><LF>.<CR><LF>\n";
-    const BYE: &[u8] = b"221 BYE\n";
-    const EMPTY: &[u8] = &[];
+    const OH_HAI: &[u8] = b"220 edgemail\n";
+    const KK: &[u8] = b"250 Ok\n";
+    const AUTH_OK: &[u8] = b"235 Ok\n";
+    const SEND_DATA_PLZ: &[u8] = b"354 End data with <CR><LF>.<CR><LF>\n";
+    const KTHXBYE: &[u8] = b"221 Bye\n";
+    const HOLD_YOUR_HORSES: &[u8] = &[];
 
-    pub fn new(domain: impl AsRef<str>) -> StateMachine {
+    pub fn new(domain: impl AsRef<str>) -> Self {
         let domain = domain.as_ref();
         let ehlo_greeting = format!("250-{domain} Hello {domain}\n250 AUTH PLAIN LOGIN\n");
-
-        StateMachine {
+        Self {
             state: State::Fresh,
             ehlo_greeting,
         }
     }
 
+    /// Handles a single SMTP command and returns a proper SMTP response
     pub fn handle_smtp(&mut self, raw_msg: &str) -> Result<&[u8]> {
-        println!("Yomama {raw_msg} in state {:?}", self.state);
+        tracing::trace!("Received {raw_msg} in state {:?}", self.state);
         let mut msg = raw_msg.split_whitespace();
         let command = msg.next().context("received empty command")?.to_lowercase();
         let state = std::mem::replace(&mut self.state, State::Fresh);
@@ -56,15 +61,15 @@ impl StateMachine {
             }
             ("helo", State::Fresh) => {
                 self.state = State::Greeted;
-                Ok(StateMachine::OK)
+                Ok(StateMachine::KK)
             }
             ("noop", _) | ("help", _) | ("info", _) | ("vrfy", _) | ("expn", _) => {
                 tracing::trace!("Got {command}");
-                Ok(StateMachine::OK)
+                Ok(StateMachine::KK)
             }
             ("rset", _) => {
                 self.state = State::Fresh;
-                Ok(StateMachine::OK)
+                Ok(StateMachine::KK)
             }
             ("auth", _) => {
                 tracing::trace!("Acknowledging AUTH");
@@ -81,21 +86,25 @@ impl StateMachine {
                     from: from.to_string(),
                     ..Default::default()
                 });
-                Ok(StateMachine::OK)
+                Ok(StateMachine::KK)
             }
             ("rcpt", State::ReceivingRcpt(mut mail)) => {
                 tracing::trace!("Receiving rcpt");
                 let to = msg.next().context("received empty RCPT")?;
                 let to = to.strip_prefix("TO:").context("received incorrect RCPT")?;
                 tracing::debug!("TO: {to}");
-                mail.to.push(to.to_string());
+                if Self::legal_recipient(to) {
+                    mail.to.push(to.to_string());
+                } else {
+                    tracing::warn!("Illegal recipient: {to}")
+                }
                 self.state = State::ReceivingRcpt(mail);
-                Ok(StateMachine::OK)
+                Ok(StateMachine::KK)
             }
             ("data", State::ReceivingRcpt(mail)) => {
                 tracing::trace!("Receiving data");
                 self.state = State::ReceivingData(mail);
-                Ok(StateMachine::SEND_DATA)
+                Ok(StateMachine::SEND_DATA_PLZ)
             }
             ("quit", State::ReceivingData(mail)) => {
                 tracing::trace!(
@@ -105,18 +114,18 @@ impl StateMachine {
                     mail.data
                 );
                 self.state = State::Received(mail);
-                Ok(StateMachine::BYE)
+                Ok(StateMachine::KTHXBYE)
             }
             ("quit", _) => {
                 tracing::warn!("Received quit before getting any data");
-                Ok(StateMachine::BYE)
+                Ok(StateMachine::KTHXBYE)
             }
             (_, State::ReceivingData(mut mail)) => {
                 tracing::trace!("Receiving data");
                 let resp = if raw_msg.ends_with("\r\n.\r\n") {
-                    StateMachine::OK
+                    StateMachine::KK
                 } else {
-                    StateMachine::EMPTY
+                    StateMachine::HOLD_YOUR_HORSES
                 };
                 mail.data += raw_msg;
                 self.state = State::ReceivingData(mail);
@@ -128,8 +137,18 @@ impl StateMachine {
             ),
         }
     }
+
+    /// Filter out admin, administrator, postmaster and hostmaster
+    /// to prevent being able to register certificates for the domain.
+    /// The check is over-eager, but it also makes it simpler.
+    fn legal_recipient(to: &str) -> bool {
+        let to = to.to_lowercase();
+        !to.contains("admin") && !to.contains("postmaster") && !to.contains("hostmaster")
+    }
 }
 
+/// SMTP server, which handles user connections
+/// and replicates received messages to the database.
 pub struct Server {
     stream: tokio::net::TcpStream,
     state_machine: StateMachine,
@@ -137,23 +156,17 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn new(domain: impl AsRef<str>, stream: tokio::net::TcpStream) -> Result<Server> {
-        Ok(Server {
+    /// Creates a new server from a connected stream
+    pub async fn new(domain: impl AsRef<str>, stream: tokio::net::TcpStream) -> Result<Self> {
+        Ok(Self {
             stream,
             state_machine: StateMachine::new(domain),
             db: Arc::new(Mutex::new(database::Client::new().await?)),
         })
     }
 
-    async fn greet(&mut self) -> Result<()> {
-        self.stream
-            .write_all(StateMachine::HI)
-            .await
-            .map_err(|e| e.into())
-    }
-
+    /// Runs the server loop, accepting and handling SMTP commands
     pub async fn serve(mut self) -> Result<()> {
-        println!("Serving");
         self.greet().await?;
 
         let mut buf = vec![0; 65536];
@@ -167,28 +180,34 @@ impl Server {
             }
             let msg = std::str::from_utf8(&buf[0..n])?;
             let response = self.state_machine.handle_smtp(msg)?;
-            if response != StateMachine::EMPTY {
+            if response != StateMachine::HOLD_YOUR_HORSES {
                 self.stream.write_all(response).await?;
             } else {
                 tracing::debug!("Not responding, awaiting more data");
             }
-            if response == StateMachine::BYE {
+            if response == StateMachine::KTHXBYE {
                 break;
             }
         }
         match self.state_machine.state {
             State::Received(mail) => {
-                println!("Received mail: {:?}", mail);
-                tracing::info!("Received mail: {:?}", mail);
-                self.db.lock().unwrap().replicate(mail).await?;
+                self.db.lock().await.replicate(mail).await?;
             }
             State::ReceivingData(mail) => {
                 tracing::info!("Received EOF before receiving QUIT");
-                self.db.lock().unwrap().replicate(mail).await?;
+                self.db.lock().await.replicate(mail).await?;
             }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Sends the initial SMTP greeting
+    async fn greet(&mut self) -> Result<()> {
+        self.stream
+            .write_all(StateMachine::OH_HAI)
+            .await
+            .map_err(|e| e.into())
     }
 }
 
@@ -198,23 +217,35 @@ mod tests {
 
     #[test]
     fn test_regular_flow() {
-        let mut sm = StateMachine::new("localhost");
+        let mut sm = StateMachine::new("dummy");
         assert_eq!(sm.state, State::Fresh);
         sm.handle_smtp("HELO localhost").unwrap();
         assert_eq!(sm.state, State::Greeted);
-        sm.handle_smtp("MAIL FROM: <tiger@gmail.com>").unwrap();
-
+        sm.handle_smtp("MAIL FROM: <local@example.com>").unwrap();
         assert!(matches!(sm.state, State::ReceivingRcpt(_)));
-        sm.handle_smtp("RCPT TO: <a@localhost>").unwrap();
+        sm.handle_smtp("RCPT TO: <a@localhost.com>").unwrap();
         assert!(matches!(sm.state, State::ReceivingRcpt(_)));
-        sm.handle_smtp("RCPT TO: <b@localhost>").unwrap();
+        sm.handle_smtp("RCPT TO: <b@localhost.com>").unwrap();
         assert!(matches!(sm.state, State::ReceivingRcpt(_)));
         sm.handle_smtp("DATA hello world\n").unwrap();
         assert!(matches!(sm.state, State::ReceivingData(_)));
         sm.handle_smtp("DATA hello world2\n").unwrap();
         assert!(matches!(sm.state, State::ReceivingData(_)));
         sm.handle_smtp("QUIT").unwrap();
-        println!("{:?}", sm.state);
         assert!(matches!(sm.state, State::Received(_)));
+    }
+
+    #[test]
+    fn test_no_greeting() {
+        let mut sm = StateMachine::new("dummy");
+        assert_eq!(sm.state, State::Fresh);
+        for command in [
+            "MAIL FROM: <local@example.com>",
+            "RCPT TO: <local@example.com>",
+            "DATA hey",
+            "GARBAGE",
+        ] {
+            assert!(sm.handle_smtp(command).is_err());
+        }
     }
 }
