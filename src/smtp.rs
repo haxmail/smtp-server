@@ -31,12 +31,12 @@ struct StateMachine {
 /// The return value from handle_smtp() is the response
 /// that should be sent back to the client.
 impl StateMachine {
-    const OH_HAI: &[u8] = b"220 edgemail\n";
-    const KK: &[u8] = b"250 Ok\n";
+    const HELLO_THERE: &[u8] = b"220 edgemail\n";
+    const OK: &[u8] = b"250 Ok\n";
     const AUTH_OK: &[u8] = b"235 Ok\n";
-    const SEND_DATA_PLZ: &[u8] = b"354 End data with <CR><LF>.<CR><LF>\n";
-    const KTHXBYE: &[u8] = b"221 Bye\n";
-    const HOLD_YOUR_HORSES: &[u8] = &[];
+    const SEND_DATA: &[u8] = b"354 End data with <CR><LF>.<CR><LF>\n";
+    const BYE: &[u8] = b"221 Bye\n";
+    const STOP: &[u8] = &[];
 
     pub fn new(domain: impl AsRef<str>) -> Self {
         let domain = domain.as_ref();
@@ -61,15 +61,15 @@ impl StateMachine {
             }
             ("helo", State::Fresh) => {
                 self.state = State::Greeted;
-                Ok(StateMachine::KK)
+                Ok(StateMachine::OK)
             }
             ("noop", _) | ("help", _) | ("info", _) | ("vrfy", _) | ("expn", _) => {
                 tracing::trace!("Got {command}");
-                Ok(StateMachine::KK)
+                Ok(StateMachine::OK)
             }
             ("rset", _) => {
                 self.state = State::Fresh;
-                Ok(StateMachine::KK)
+                Ok(StateMachine::OK)
             }
             ("auth", _) => {
                 tracing::trace!("Acknowledging AUTH");
@@ -86,7 +86,7 @@ impl StateMachine {
                     from: from.to_string(),
                     ..Default::default()
                 });
-                Ok(StateMachine::KK)
+                Ok(StateMachine::OK)
             }
             ("rcpt", State::ReceivingRcpt(mut mail)) => {
                 tracing::trace!("Receiving rcpt");
@@ -99,12 +99,12 @@ impl StateMachine {
                     tracing::warn!("Illegal recipient: {to}")
                 }
                 self.state = State::ReceivingRcpt(mail);
-                Ok(StateMachine::KK)
+                Ok(StateMachine::OK)
             }
             ("data", State::ReceivingRcpt(mail)) => {
                 tracing::trace!("Receiving data");
                 self.state = State::ReceivingData(mail);
-                Ok(StateMachine::SEND_DATA_PLZ)
+                Ok(StateMachine::SEND_DATA)
             }
             ("quit", State::ReceivingData(mail)) => {
                 tracing::trace!(
@@ -114,18 +114,18 @@ impl StateMachine {
                     mail.data
                 );
                 self.state = State::Received(mail);
-                Ok(StateMachine::KTHXBYE)
+                Ok(StateMachine::BYE)
             }
             ("quit", _) => {
                 tracing::warn!("Received quit before getting any data");
-                Ok(StateMachine::KTHXBYE)
+                Ok(StateMachine::BYE)
             }
             (_, State::ReceivingData(mut mail)) => {
                 tracing::trace!("Receiving data");
                 let resp = if raw_msg.ends_with("\r\n.\r\n") {
-                    StateMachine::KK
+                    StateMachine::OK
                 } else {
-                    StateMachine::HOLD_YOUR_HORSES
+                    StateMachine::STOP
                 };
                 mail.data += raw_msg;
                 self.state = State::ReceivingData(mail);
@@ -180,12 +180,12 @@ impl Server {
             }
             let msg = std::str::from_utf8(&buf[0..n])?;
             let response = self.state_machine.handle_smtp(msg)?;
-            if response != StateMachine::HOLD_YOUR_HORSES {
+            if response != StateMachine::STOP {
                 self.stream.write_all(response).await?;
             } else {
                 tracing::debug!("Not responding, awaiting more data");
             }
-            if response == StateMachine::KTHXBYE {
+            if response == StateMachine::BYE {
                 break;
             }
         }
@@ -205,7 +205,7 @@ impl Server {
     /// Sends the initial SMTP greeting
     async fn greet(&mut self) -> Result<()> {
         self.stream
-            .write_all(StateMachine::OH_HAI)
+            .write_all(StateMachine::HELLO_THERE)
             .await
             .map_err(|e| e.into())
     }

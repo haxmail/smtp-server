@@ -4,8 +4,6 @@ use tokio::net::TcpListener;
 use std::env;
 
 use haxmail::smtp;
-
-/// A helper function for cleaning up old mail from the database
 fn periodically_clean_db(period: tokio::time::Duration) {
     std::thread::spawn(move || -> Result<()> {
         tokio::runtime::Builder::new_current_thread()

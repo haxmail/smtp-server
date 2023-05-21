@@ -7,10 +7,6 @@ pub struct Client {
 }
 
 impl Client {
-    /// Creates a new database client.
-    /// If the LIBSQL_CLIENT_URL environment variable is not set, a local database will be used.
-    /// It's also possible to use a remote database by setting the LIBSQL_CLIENT_URL environment variable.
-    /// The `mail` table will be automatically created if it does not exist.
     pub async fn new() -> Result<Self> {
         if std::env::var("LIBSQL_CLIENT_URL").is_err() {
             let mut db_path = std::env::temp_dir();
@@ -46,15 +42,15 @@ impl Client {
     /// Cleans up old mail
     pub async fn delete_old_mail(&self) -> Result<()> {
         let now = chrono::offset::Utc::now();
-        let a_week_ago = now - chrono::Duration::days(7);
-        let a_week_ago = &a_week_ago.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-        tracing::debug!("Deleting old mail from before {a_week_ago}");
+        let week_old = now - chrono::Duration::days(7);
+        let week_old = &week_old.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+        tracing::debug!("Deleting old mail from before {week_old}");
 
         let count: i64 = i64::try_from(
             self.db
                 .execute(Statement::with_args(
                     "SELECT COUNT(*) FROM mail WHERE date < ?",
-                    libsql_client::args!(a_week_ago),
+                    libsql_client::args!(week_old),
                 ))
                 .await?
                 .rows
@@ -70,7 +66,7 @@ impl Client {
         self.db
             .execute(Statement::with_args(
                 "DELETE FROM mail WHERE date < ?",
-                libsql_client::args!(a_week_ago),
+                libsql_client::args!(week_old),
             ))
             .await
             .ok();
