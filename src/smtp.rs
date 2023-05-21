@@ -1,5 +1,9 @@
+use std::sync::{Arc, Mutex};
+
 use anyhow::{Context, Ok, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::database;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Mail {
     pub from: String,
@@ -129,6 +133,7 @@ impl StateMachine {
 pub struct Server {
     stream: tokio::net::TcpStream,
     state_machine: StateMachine,
+    db: Arc<Mutex<database::Client>>,
 }
 
 impl Server {
@@ -136,6 +141,7 @@ impl Server {
         Ok(Server {
             stream,
             state_machine: StateMachine::new(domain),
+            db: Arc::new(Mutex::new(database::Client::new().await?)),
         })
     }
 
@@ -148,34 +154,36 @@ impl Server {
 
     pub async fn serve(mut self) -> Result<()> {
         self.greet().await?;
-        let mut buffer = vec![0; 65536];
+
+        let mut buf = vec![0; 65536];
         loop {
-            let n = self.stream.read(&mut buffer).await?;
+            let n = self.stream.read(&mut buf).await?;
 
             if n == 0 {
+                tracing::info!("Received EOF");
                 self.state_machine.handle_smtp("quit").ok();
                 break;
             }
-
-            let msg = std::str::from_utf8(&buffer[..n])?;
+            let msg = std::str::from_utf8(&buf[0..n])?;
             let response = self.state_machine.handle_smtp(msg)?;
             if response != StateMachine::EMPTY {
                 self.stream.write_all(response).await?;
             } else {
+                tracing::debug!("Not responding, awaiting more data");
             }
             if response == StateMachine::BYE {
                 break;
             }
-
-            match self.state_machine.state {
-                State::Received(ref mut mail) => {
-                    println!("mail: {:?}", mail);
-                }
-                State::ReceivingData(ref mut mail) => {
-                    println!("EOF before end {:?}", mail);
-                }
-                _ => {}
+        }
+        match self.state_machine.state {
+            State::Received(mail) => {
+                self.db.lock().unwrap().replicate(mail).await?;
             }
+            State::ReceivingData(mail) => {
+                tracing::info!("Received EOF before receiving QUIT");
+                self.db.lock().unwrap().replicate(mail).await?;
+            }
+            _ => {}
         }
         Ok(())
     }
