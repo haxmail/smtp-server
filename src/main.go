@@ -20,6 +20,6 @@ func main() {
 			fmt.Println("Failed of accept connection", err)
 			continue
 		}
-		services.HandleClient(conn)
+		go services.HandleClient(conn)
 	}
 }
