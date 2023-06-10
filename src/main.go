@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"net"
-	"smtpserver/services"
+	"smtpserver/src/services"
 )
 
 func main() {
