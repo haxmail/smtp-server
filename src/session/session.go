@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"smtpserver/db"
+	"smtpserver/pkg/models"
 
 	"github.com/emersion/go-smtp"
 )
@@ -30,6 +32,16 @@ func (s *SmtpSession) Data(r io.Reader) error {
 		return err
 	} else {
 		log.Println("Received message: ", string(b))
+		email := models.Email{
+			From: s.From,
+			To:   s.To[0],
+			Body: string(b),
+		}
+		newEmail, err := db.EmailSvc.CreateEmail(email)
+		if err != nil {
+			log.Println(err)
+		}
+		log.Println(newEmail)
 		return nil
 	}
 }
