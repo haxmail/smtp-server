@@ -1,37 +1,43 @@
-# fly.toml app configuration file generated for haxmail on 2023-05-21T14:38:46+05:30
+# fly.toml app configuration file generated for haxmail on 2024-10-31T12:43:43+05:30
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = "haxmail"
-primary_region = "ams"
-processes = []
-
-[env]
+app = 'haxmail'
+primary_region = 'ams'
 
 [experimental]
-auto_rollback = true
+  auto_rollback = true
+
+[build]
+
+[http_service]
+  internal_port = 2525
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
 
 [[services]]
-internal_port = 8080
-protocol = "tcp"
+  protocol = 'tcp'
+  internal_port = 2525
+  tcp_checks=[]
+  http_checks=[]
 
-[[services.ports]]
-port = 25
+  [[services.ports]]
+    port = 25
 
-[[services.ports]]
-port = 465
+  [[services.ports]]
+    port = 465
 
-[[services.ports]]
-handlers = ["tls"]
-port = 587
+  [[services.ports]]
+    port = 587
+    handlers = ['tls']
 
-[[services.ports]]
-handlers = ["tls"]
-port = 2525
+  [[services.ports]]
+    port = 2525
+    handlers = ['tls']
 
-[[services.tcp_checks]]
-grace_period = "1s"
-interval = "15s"
-restart_limit = 0
-timeout = "2s"
+[[vm]]
+  size = 'shared-cpu-1x'
