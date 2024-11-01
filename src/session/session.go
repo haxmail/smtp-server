@@ -7,6 +7,7 @@ import (
 	"smtpserver/db"
 	"smtpserver/pkg/models"
 
+	"github.com/DusanKasan/parsemail"
 	"github.com/emersion/go-smtp"
 )
 
@@ -28,22 +29,33 @@ func (s *SmtpSession) Rcpt(to string, opts *smtp.RcptOptions) error {
 }
 
 func (s *SmtpSession) Data(r io.Reader) error {
-	if b, err := io.ReadAll(r); err != nil {
+	/*b, err := io.ReadAll(r)
+	if err != nil {
 		return err
-	} else {
-		log.Println("Received message: ", string(b))
-		email := models.Email{
-			From: s.From,
-			To:   s.To[0],
-			Body: string(b),
-		}
-		newEmail, err := db.EmailSvc.CreateEmail(email)
-		if err != nil {
-			log.Println(err)
-		}
-		log.Println(newEmail)
-		return nil
 	}
+	log.Println("Received message: ", string(b))*/
+	data, err := parsemail.Parse(r)
+	if err != nil {
+		return err
+	}
+	log.Println("Parsed email data: ", data)
+	body := data.HTMLBody
+	if data.HTMLBody == "" {
+		body = data.TextBody
+	}
+	email := models.Email{
+		From:    s.From,
+		To:      s.To[0],
+		Subject: data.Subject,
+		Body:    body,
+	}
+	newEmail, err := db.EmailSvc.CreateEmail(email)
+	if err != nil {
+		log.Println(err)
+	}
+	log.Println(newEmail)
+	return nil
+
 }
 
 func (s *SmtpSession) AuthPlain(username, password string) error {
